@@ -1,0 +1,128 @@
+rule_files:
+  - ../patterns.rules.yml
+  - ../checkout-slo.rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # Client "big": 50 req/s, no errors. Client "small": 1 req/s, all failing.
+  # Client "tiny": 3 requests per 10 min, 1 error (33%) but only 1 error → guard keeps it silent.
+  - name: per-client ratio with minimum-count guard
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="api", client_id="big", http_response_status_code="200"}'
+        values: '0+3000x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="api", client_id="small", http_response_status_code="500"}'
+        values: '0+60x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="api", client_id="tiny", http_response_status_code="200"}'
+        values: '0+0.2x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="api", client_id="tiny", http_response_status_code="500"}'
+        values: '0+0.1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ClientErrorRatioHigh
+        exp_alerts:
+          - exp_labels:
+              service_name: api
+              client_id: small
+              severity: page
+            exp_annotations:
+              summary: "api: client small error ratio 100%"
+              runbook_url: https://wiki.example/runbooks/client-errors
+
+  - name: count alert fires on a single DLQ message
+    interval: 1m
+    input_series:
+      - series: 'messaging_dlq_messages_total{queue="payments"}'
+        values: '0 0 0 0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: DeadLetterQueueReceivedMessages
+        exp_alerts:
+          - exp_labels:
+              queue: payments
+              severity: ticket
+            exp_annotations:
+              summary: "Messages landed in DLQ payments"
+              runbook_url: https://wiki.example/runbooks/dlq
+
+  - name: absence alert when orders stop
+    interval: 1m
+    input_series:
+      - series: 'orders_total'
+        values: '0+10x20 200+0x30'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: NoOrdersReceived
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: NoOrdersReceived
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: "No orders in the last 15 minutes"
+              runbook_url: https://wiki.example/runbooks/no-orders
+
+  # Rolling update: 1.41.3 at 0.2% errors, 1.42.0 at 4% errors → regression
+  - name: release regression between two versions
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.41.3", http_response_status_code="200"}'
+        values: '0+598.8x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.41.3", http_response_status_code="500"}'
+        values: '0+1.2x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.42.0", http_response_status_code="200"}'
+        values: '0+576x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.42.0", http_response_status_code="500"}'
+        values: '0+24x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReleaseRegression
+        exp_alerts:
+          - exp_labels:
+              service_name: checkout
+              severity: page
+              suspect: deploy
+            exp_annotations:
+              summary: "checkout: one version has a much higher error ratio than the other"
+              runbook_url: https://wiki.example/runbooks/rollback
+
+  # Only one version running with high errors → not a *release* regression (the SLO alert covers it)
+  - name: single version is not a regression
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.42.0", http_response_status_code="200"}'
+        values: '0+576x30'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", service_version="1.42.0", http_response_status_code="500"}'
+        values: '0+24x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ReleaseRegression
+        exp_alerts: []
+
+  # Deploy at minute 60 (generation 7 → 8), errors start → burn + recent deploy
+  - name: burn after deploy
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_observed_generation{deployment="checkout", namespace="prod"}'
+        values: '7x60 8x40'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="200"}'
+        values: '0+6000x60 360000+5000x40'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="500"}'
+        values: '0+0x60 0+1000x40'
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: CheckoutBurnAfterDeploy
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: CheckoutBurnAfterDeploy
+        exp_alerts:
+          - exp_labels:
+              service_name: checkout
+              severity: page
+              suspect: deploy
+              team: checkout
+            exp_annotations:
+              summary: "checkout burning error budget, deploy in the last 30 min: consider rollback"
+              runbook_url: https://wiki.example/runbooks/rollback-checkout

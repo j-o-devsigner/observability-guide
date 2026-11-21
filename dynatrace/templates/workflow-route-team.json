@@ -1,0 +1,29 @@
+{
+  "title": "Route problems · {{ .team }}",
+  "description": "Pages the {{ .team }} on-call for problems whose events carry team={{ .team }}. Generated; do not edit in the UI.",
+  "isPrivate": false,
+  "trigger": {
+    "eventTrigger": {
+      "isActive": true,
+      "triggerConfiguration": {
+        "type": "davis-problem",
+        "value": {
+          "onProblemClose": false,
+          "categories": { "error": true, "slowdown": true, "resource": true, "availability": true, "custom": true },
+          "customFilter": "team == \"{{ .team }}\""
+        }
+      }
+    }
+  },
+  "tasks": {
+    "notify_oncall": {
+      "name": "notify_oncall",
+      "description": "Send the problem to the team's on-call channel",
+      "action": "dynatrace.slack:slack-send-message",
+      "input": {
+        "channel": "{{ .channel }}",
+        "message": "{{ "{{" }} event()['display_id'] {{ "}}" }} · {{ "{{" }} event()['event.name'] {{ "}}" }}"
+      }
+    }
+  }
+}

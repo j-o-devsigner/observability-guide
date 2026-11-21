@@ -1,0 +1,12 @@
+# A shared platform service (owned by the platform team), measured from its callers
+service: orders-db
+team: platform-data
+tier: 1
+archetype: platform-service
+address: orders-db.data.svc     # server.address that callers' client spans carry
+consumers: [checkout, orders-worker]
+slo:
+  availability: 99.99            # stricter than every user-facing SLO that depends on it
+saturation:
+  - { resource: connections, threshold: 80 }
+runbook: https://wiki.example/runbooks/orders-db

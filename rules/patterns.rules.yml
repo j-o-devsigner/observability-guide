@@ -1,0 +1,93 @@
+# Alert patterns from standard/11 (percentage vs count) and standard/12 (releases). Open-source variant.
+# Tested: rules/tests/patterns.test.yml (promtool test rules)
+groups:
+  - name: per-version
+    rules:
+      # Error ratio per version, only for versions with real traffic (>= 0.5 req/s over 10m)
+      - record: version:error_ratio:rate10m
+        expr: |
+          (
+            sum by (service_name, service_version) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[10m]))
+            /
+            sum by (service_name, service_version) (rate(http_server_request_duration_seconds_count[10m]))
+          )
+          and
+          sum by (service_name, service_version) (rate(http_server_request_duration_seconds_count[10m])) >= 0.5
+
+  - name: patterns
+    rules:
+      # Ratio + minimum count, per client (standard/11 §3)
+      - alert: ClientErrorRatioHigh
+        expr: |
+          (
+            sum by (service_name, client_id) (rate(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[10m]))
+            /
+            sum by (service_name, client_id) (rate(http_server_request_duration_seconds_count[10m]))
+            > 0.05
+          )
+          and on (service_name, client_id)
+          (
+            sum by (service_name, client_id) (increase(http_server_request_duration_seconds_count{http_response_status_code=~"5.."}[10m]))
+            > 20
+          )
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.service_name }}: client {{ $labels.client_id }} error ratio {{ $value | humanizePercentage }}"
+          runbook_url: https://wiki.example/runbooks/client-errors
+
+      # Count: every occurrence matters (standard/11 §2)
+      - alert: DeadLetterQueueReceivedMessages
+        expr: sum by (queue) (increase(messaging_dlq_messages_total[10m])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "Messages landed in DLQ {{ $labels.queue }}"
+          runbook_url: https://wiki.example/runbooks/dlq
+
+      # Absence: a business flow went silent (standard/11 §2)
+      - alert: NoOrdersReceived
+        expr: sum(increase(orders_total[15m])) == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "No orders in the last 15 minutes"
+          runbook_url: https://wiki.example/runbooks/no-orders
+
+      # Release regression: while 2+ versions serve traffic, worst is 2x the best and above 1% (standard/12 §3)
+      - alert: ReleaseRegression
+        expr: |
+          (
+            max by (service_name) (version:error_ratio:rate10m)
+            > 2 * min by (service_name) (version:error_ratio:rate10m)
+          )
+          and on (service_name) count by (service_name) (version:error_ratio:rate10m) > 1
+          and on (service_name) max by (service_name) (version:error_ratio:rate10m) > 0.01
+        for: 2m
+        labels:
+          severity: page
+          suspect: deploy
+        annotations:
+          summary: "{{ $labels.service_name }}: one version has a much higher error ratio than the other"
+          runbook_url: https://wiki.example/runbooks/rollback
+
+      # SLO burn + deploy in the last 30 min (standard/12 §3)
+      - alert: CheckoutBurnAfterDeploy
+        expr: |
+          slo:sli_error:ratio_rate1h{service_name="checkout"} > (14.4 * 0.001)
+          and on (service_name)
+          max by (service_name) (
+            label_replace(
+              changes(kube_deployment_status_observed_generation{deployment="checkout"}[30m]),
+              "service_name", "$1", "deployment", "(.*)"
+            )
+          ) > 0
+        labels:
+          severity: page
+          suspect: deploy
+          team: checkout
+        annotations:
+          summary: "checkout burning error budget, deploy in the last 30 min: consider rollback"
+          runbook_url: https://wiki.example/runbooks/rollback-checkout

@@ -1,0 +1,120 @@
+# TIER 1 · AGENT (DaemonSet, one per node)
+# Reads what only the node can see (container logs, kubelet stats) and receives OTLP from pods on the node.
+# Sends everything to the gateway. Keeps a DURABLE buffer on the node's disk (the only stateful tier).
+# Based on the aks-observability lab agent (tested: 0 log lines lost in a 10-min backend outage, also with a restart).
+# Needs: env K8S_NODE_NAME (downward API spec.nodeName), hostPath /var/log/pods (read-only) and /var/lib/otelcol (rw),
+#        RBAC for nodes/stats + nodes/proxy, pods, namespaces, replicasets.
+# Validated with otel/opentelemetry-collector-contrib:0.162.0 (`make check-collector`).
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol        # log read positions + persistent export queue survive agent restarts
+    create_directory: true
+  health_check:
+    endpoint: ${env:MY_POD_IP}:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:MY_POD_IP}:4317   # pods send to the agent on their node (hostPort / node IP)
+      http:
+        endpoint: ${env:MY_POD_IP}:4318
+
+  filelog:
+    include: [/var/log/pods/*/*/*.log]
+    exclude: [/var/log/pods/*/otel-agent*/*.log]  # never collect your own logs in a loop
+    start_at: end
+    include_file_path: true
+    storage: file_storage
+    operators:
+      - type: container                            # parses containerd/docker format, adds k8s.pod/namespace/container
+        id: container-parser
+
+  kubeletstats:
+    collection_interval: 30s
+    auth_type: serviceAccount
+    endpoint: https://${env:K8S_NODE_NAME}:10250
+    insecure_skip_verify: true                     # many kubelets use self-signed serving certs; prefer a CA if you have one
+    metric_groups: [node, pod, container, volume]
+    metrics:                                       # off by default; "memory vs limit" and "CPU vs request" directly
+      k8s.container.cpu_limit_utilization: { enabled: true }
+      k8s.container.cpu_request_utilization: { enabled: true }
+      k8s.container.memory_limit_utilization: { enabled: true }
+      k8s.container.memory_request_utilization: { enabled: true }
+  # hostmetrics is NOT used: Dynatrace notes it duplicates kubeletstats node metrics. Add it only for non-k8s hosts.
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  k8sattributes:
+    filter:
+      node_from_env_var: K8S_NODE_NAME             # only watch pods of this node (scales to big clusters)
+    extract:
+      metadata: [k8s.namespace.name, k8s.pod.name, k8s.pod.uid, k8s.deployment.name, k8s.node.name, k8s.container.name]
+      labels:
+        - { tag_name: service.version, key: app.kubernetes.io/version, from: pod }
+        - { tag_name: team, key: team, from: pod }
+
+  # JSON log lines -> attributes, level -> severity, trace context -> trace_id/span_id (from the lab, generic keys)
+  transform/parse_json_logs:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        conditions:
+          - IsString(body) and IsMatch(body, "^\\s*\\{")
+        statements:
+          - merge_maps(attributes, ParseJSON(body), "insert")
+          - set(severity_text, attributes["level"]) where attributes["level"] != nil
+          - set(severity_text, attributes["severity"]) where severity_text == "" and attributes["severity"] != nil
+          - set(severity_text, ConvertCase(severity_text, "upper")) where severity_text != ""
+          - set(body, attributes["msg"]) where attributes["msg"] != nil
+          - set(body, attributes["message"]) where attributes["message"] != nil
+          - set(trace_id.string, attributes["trace_id"]) where attributes["trace_id"] != nil
+          - set(span_id.string, attributes["span_id"]) where attributes["span_id"] != nil
+          - delete_matching_keys(attributes, "^(msg|message|time|ts)$")
+      - context: log
+        statements:
+          - set(severity_number, SEVERITY_NUMBER_DEBUG) where severity_text == "DEBUG"
+          - set(severity_number, SEVERITY_NUMBER_INFO) where IsMatch(severity_text, "^(INFO|INFORMATION)$")
+          - set(severity_number, SEVERITY_NUMBER_WARN) where IsMatch(severity_text, "^(WARN|WARNING)$")
+          - set(severity_number, SEVERITY_NUMBER_ERROR) where IsMatch(severity_text, "^(ERROR|ERR)$")
+          - set(severity_number, SEVERITY_NUMBER_FATAL) where IsMatch(severity_text, "^(CRITICAL|FATAL|PANIC)$")
+
+exporters:
+  otlp_grpc/gateway:
+    endpoint: otel-gateway.observability.svc:4317
+    tls: { insecure: true }                        # in-cluster hop; use TLS if your policy requires it
+    sending_queue:                                 # persistent: survives agent restarts and long outages (lab: 0 lost)
+      enabled: true
+      storage: file_storage
+      sizer: bytes
+      queue_size: 536870912                        # 512 MiB of disk per node
+      num_consumers: 2                             # paced replay after an outage
+      batch: { flush_timeout: 5s, sizer: bytes, min_size: 1048576, max_size: 3145728 }   # < 4 MB requests
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0                          # never give up on retryable errors (default 5 min = data loss)
+      max_interval: 30s
+
+service:
+  extensions: [file_storage, health_check]
+  telemetry:
+    metrics:
+      level: detailed
+  pipelines:
+    metrics:
+      receivers: [otlp, kubeletstats]
+      processors: [memory_limiter, k8sattributes]
+      exporters: [otlp_grpc/gateway]
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, k8sattributes, transform/parse_json_logs]
+      exporters: [otlp_grpc/gateway]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, k8sattributes]
+      exporters: [otlp_grpc/gateway]

@@ -1,0 +1,125 @@
+# TIER 3 · GATEWAY (Deployment, 2+ replicas, PodDisruptionBudget minAvailable 1)
+# Every rule is applied ONCE here: cluster identity, masking, label allow-list, health-check filtering,
+# delta conversion, and the export to Dynatrace. Apps and agents stay simple; change backends only here.
+# Stateless: the durable buffer is on the agents; a full queue BLOCKS (backpressure) instead of dropping.
+# Based on the aks-observability lab gateway (tested: masking, churn, log loss). Validated with
+# otel/opentelemetry-collector-contrib:0.162.0 (`make check-collector`).
+# Needs env: DT_ENDPOINT (https://<tenant>.live.dynatrace.com/api/v2/otlp or the ActiveGate URL), DT_API_TOKEN
+#            (scopes: metrics.ingest, logs.ingest, openTelemetryTrace.ingest), K8S_CLUSTER_NAME, K8S_CLUSTER_UID
+#            (uid of the kube-system namespace), DEPLOY_ENV.
+# A second backend (e.g. an open-source stack) = one more exporter in the pipelines: see gateway-fanout.yaml.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: ${env:MY_POD_IP}:4317
+      http:
+        endpoint: ${env:MY_POD_IP}:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+  # Cluster identity on every signal (same k8s.cluster.uid convention OTel and Dynatrace use)
+  resource/cluster:
+    attributes:
+      - { key: k8s.cluster.name, value: "${env:K8S_CLUSTER_NAME}", action: upsert }
+      - { key: k8s.cluster.uid, value: "${env:K8S_CLUSTER_UID}", action: upsert }
+      - { key: deployment.environment.name, value: "${env:DEPLOY_ENV}", action: upsert }
+
+  # Health checks and synthetic probes: no diagnostic value as spans, real cost. Only childless server spans.
+  filter/drop_health_checks:
+    error_mode: ignore
+    traces:
+      span:
+        - kind == SPAN_KIND_SERVER and IsMatch(attributes["http.route"], "^/(healthz|readyz|livez|health|ready|live)$")
+        - kind == SPAN_KIND_SERVER and IsMatch(attributes["user_agent.original"], "^(kube-probe/|otel-httpcheck)")
+
+  # Mask before data leaves the cluster (lab: Dynatrace stored 40,892 DB spans with a username before this).
+  # Short version of the lab rules; the lab repo has the full set and an end-to-end test (make test-redaction).
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - replace_pattern(attributes["db.query.text"], "'(?:[^']|'')*'", "?")
+          - replace_pattern(attributes["url.full"], "([?&][^=&#]+)=[^&#]*", "$${1}=REDACTED")
+          - delete_matching_keys(attributes, "(?i)^(http\\.(request|response)\\.header\\.)?(authorization|cookie|set[-_]cookie|x[-_]api[-_]key)$")
+          - replace_all_patterns(attributes, "value", "(?i)\\b((?:user(?:name| ?id)?|uid|password|pwd|secret|api[_-]?key|access[_-]?token)\\s*[=:]\\s*)[^\\s,;&\"$][^\\s,;&\"]*", "$${1}REDACTED")
+          - replace_all_patterns(attributes, "value", "(?i)\\b(bearer|basic)\\s+[A-Za-z0-9._~+/=-]+", "$${1} REDACTED")
+          - replace_all_patterns(attributes, "value", "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*", "REDACTED_JWT")
+          - replace_all_patterns(attributes, "value", "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "REDACTED_EMAIL")
+    log_statements:
+      - context: log
+        statements:
+          - replace_pattern(body, "(?i)\\b((?:password|pwd|secret|api[_-]?key|access[_-]?token)\\s*[=:]\\s*)[^\\s,;&\"$][^\\s,;&\"]*", "$${1}REDACTED") where IsString(body)
+          - replace_pattern(body, "(?i)\\b(bearer|basic)\\s+[A-Za-z0-9._~+/=-]+", "$${1} REDACTED") where IsString(body)
+          - replace_pattern(body, "eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]*", "REDACTED_JWT") where IsString(body)
+          - replace_pattern(body, "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "REDACTED_EMAIL") where IsString(body)
+
+  # Metric labels: allow-list of STABLE resource attributes (lab: 50 -> 28 labels, restart churn 470 -> 18 series).
+  # Dynatrace drops a whole data point above 50 dimensions. Never remove a k8s.*.name (it identifies the series).
+  transform/metric_labels:
+    error_mode: ignore
+    metric_statements:
+      - context: resource
+        statements:
+          - keep_matching_keys(attributes, "^(service\\.(name|namespace|version|instance\\.id)|deployment\\.environment\\.name|cloud\\.(region|availability_zone)|host\\.name|team|k8s\\.[a-z_.]+\\.name|k8s\\.(cluster|pod)\\.uid|k8s\\.container\\.status\\.last_terminated_reason)$")
+      - context: datapoint
+        statements:
+          - delete_key(attributes, "network.peer.address")
+          - delete_key(attributes, "network.peer.port")
+
+  # Dynatrace ingests delta only. Stateful: each series must always reach the same gateway replica
+  # (fine when each agent keeps one gRPC connection to one gateway, as in the lab).
+  cumulative_to_delta:
+    max_staleness: 10m
+
+exporters:
+  otlp_http/dynatrace:
+    endpoint: ${env:DT_ENDPOINT}
+    headers:
+      Authorization: "Api-Token ${env:DT_API_TOKEN}"
+    sending_queue:
+      enabled: true
+      sizer: bytes
+      queue_size: 67108864                         # 64 MiB in memory; the durable buffer is on the agents
+      block_on_overflow: true                      # backpressure instead of dropping (lab: 83% -> 0% loss)
+      num_consumers: 4
+      batch: { flush_timeout: 5s, sizer: bytes, min_size: 1048576, max_size: 3145728 }   # Dynatrace limit: 4 MB
+    retry_on_failure:
+      enabled: true
+      max_elapsed_time: 0
+      max_interval: 30s
+
+service:
+  telemetry:
+    metrics:
+      level: detailed                              # Dynatrace's collector self-monitoring dashboards need "detailed"
+      readers:
+        - periodic:                                # self-monitoring straight to Dynatrace (delta, OTLP/HTTP protobuf)
+            interval: 60000
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: ${env:DT_ENDPOINT}/v1/metrics
+                temporality_preference: delta
+                headers:
+                  - name: Authorization
+                    value: "Api-Token ${env:DT_API_TOKEN}"
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/cluster, transform/metric_labels, cumulative_to_delta]
+      exporters: [otlp_http/dynatrace]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, transform/redact, resource/cluster]
+      exporters: [otlp_http/dynatrace]
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/drop_health_checks, transform/redact, resource/cluster]
+      exporters: [otlp_http/dynatrace]

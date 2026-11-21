@@ -1,0 +1,29 @@
+# Monaco deployment manifest: which projects go to which Dynatrace environments.
+# Tokens and URLs come from environment variables (CI secrets), never from this file.
+manifestVersion: 1.0
+
+projects:
+  - name: shared                 # one L1 dashboard with a $service variable, deployed once
+    path: shared
+  - name: teams                  # one routing workflow per team (generated)
+    type: grouping
+    path: projects/teams
+  - name: services               # SLOs and custom alerts per service (generated)
+    type: grouping
+    path: projects/services
+
+environmentGroups:
+  - name: default
+    environments:
+      - name: prod
+        url:
+          type: environment
+          value: DT_ENV_URL          # e.g. https://<env-id>.apps.dynatrace.com
+        auth:
+          token:
+            name: DT_API_TOKEN       # settings (custom alerts)
+          oAuth:                     # platform APIs: SLOs (slo-v2), documents, workflows
+            clientId:
+              name: DT_OAUTH_CLIENT_ID
+            clientSecret:
+              name: DT_OAUTH_CLIENT_SECRET

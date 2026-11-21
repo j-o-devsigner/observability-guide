@@ -1,0 +1,55 @@
+{
+  "enabled": true,
+  "title": "{{ .service }} · no successful run in 2 intervals",
+  "description": "Batch job has not succeeded for {{ .max_gap_h }} h (2 × schedule). Runbook: {{ .runbook }}",
+  "source": "monaco",
+  "analyzer": {
+    "name": "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer",
+    "input": [
+      {
+        "key": "query",
+        "value": "timeseries last_success = max(<job last success timestamp metric>), filter:{ service.name == \"{{ .service }}\" }, interval:15m\n| fieldsAdd hours_since = iCollectArray((unixSecondsFromTimestamp(now()) - last_success[]) / 3600)\n| fields timeframe, interval, hours_since"
+      },
+      {
+        "key": "threshold",
+        "value": "{{ .max_gap_h }}"
+      },
+      {
+        "key": "alertCondition",
+        "value": "ABOVE"
+      },
+      {
+        "key": "violatingSamples",
+        "value": "1"
+      },
+      {
+        "key": "slidingWindow",
+        "value": "1"
+      },
+      {
+        "key": "dealertingSamples",
+        "value": "2"
+      }
+    ]
+  },
+  "eventTemplate": {
+    "properties": [
+      {
+        "key": "event.type",
+        "value": "ERROR_EVENT"
+      },
+      {
+        "key": "event.name",
+        "value": "{{ .service }}: batch job is overdue"
+      },
+      {
+        "key": "team",
+        "value": "{{ .team }}"
+      },
+      {
+        "key": "runbook",
+        "value": "{{ .runbook }}"
+      }
+    ]
+  }
+}

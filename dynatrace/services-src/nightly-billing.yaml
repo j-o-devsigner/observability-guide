@@ -1,0 +1,6 @@
+service: nightly-billing
+team: finance-platform
+tier: 3
+archetype: batch
+schedule_hours: 24          # alert when there was no successful run in 2 intervals
+runbook: https://wiki.example/runbooks/nightly-billing

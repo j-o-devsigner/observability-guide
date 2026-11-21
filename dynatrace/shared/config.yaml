@@ -1,0 +1,10 @@
+# The ONE L1 service dashboard (variable $service). Deployed once; every service uses it.
+configs:
+  - id: dashboard-service-l1
+    type:
+      document:
+        kind: dashboard
+        private: false        # Monaco-created documents are private by default
+    config:
+      name: Service (L1)
+      template: dashboard-service.json

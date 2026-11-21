@@ -1,0 +1,55 @@
+# TIER 2 · CLUSTER COLLECTOR (Deployment, exactly 1 replica)
+# Watches the Kubernetes API: object state (deployments, pods, nodes, jobs, HPAs), container restarts and the
+# OOMKilled reason, Kubernetes events as logs, and internal synthetic checks. One replica only: k8s_cluster and
+# k8sobjects produce duplicates when run more than once (OTel docs).
+# Based on the aks-observability lab cluster collector. Validated with otel/opentelemetry-collector-contrib:0.162.0.
+# Needs RBAC: get/list/watch on nodes, namespaces, pods, events, deployments, replicasets, statefulsets, daemonsets,
+#             jobs, cronjobs, horizontalpodautoscalers, resourcequotas.
+
+receivers:
+  k8s_cluster:
+    collection_interval: 30s
+    node_conditions_to_report: [Ready, MemoryPressure, DiskPressure, PIDPressure]
+    allocatable_types_to_report: [cpu, memory]
+    resource_attributes:
+      k8s.container.status.last_terminated_reason: { enabled: true }   # OOMKilled, Error... (lab: detect OOM by reason)
+
+  k8sobjects:
+    objects:
+      - name: events
+        mode: watch
+        group: events.k8s.io                         # scheduling failures, image pulls, OOM, back-off, rollouts
+
+  httpcheck:                                       # internal synthetic checks; identify the traffic so it can be filtered
+    collection_interval: 30s
+    targets:
+      - endpoint: http://checkout.shop.svc:8080/healthz
+        method: GET
+        headers: { User-Agent: otel-httpcheck }
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+exporters:
+  otlp_grpc/gateway:
+    endpoint: otel-gateway.observability.svc:4317
+    tls: { insecure: true }
+    sending_queue: { enabled: true, queue_size: 5000 }
+    retry_on_failure: { enabled: true, max_elapsed_time: 0 }
+
+service:
+  telemetry:
+    metrics:
+      level: detailed
+  pipelines:
+    metrics:
+      receivers: [k8s_cluster, httpcheck]
+      processors: [memory_limiter]
+      exporters: [otlp_grpc/gateway]
+    logs:
+      receivers: [k8sobjects]
+      processors: [memory_limiter]
+      exporters: [otlp_grpc/gateway]

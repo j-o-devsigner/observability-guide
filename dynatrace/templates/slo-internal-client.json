@@ -1,0 +1,20 @@
+{
+  "name": "{{ .service }} · availability as seen by callers",
+  "description": "Internal SLO measured from client spans of every caller. Owner: {{ .team }}. Consumers: {{ .consumers }}.",
+  "customSli": {
+    "indicator": "fetch spans\n| filter span.kind == \"client\" and server.address == \"{{ .address }}\"\n| makeTimeseries { calls = count(), failed = countIf(isNotNull(error.type)) }\n| fieldsAdd sli = 100 * (1 - failed[] / calls[])"
+  },
+  "criteria": [
+    {
+      "timeframeFrom": "now-28d",
+      "timeframeTo": "now",
+      "target": {{ .target }}
+    }
+  ],
+  "tags": [
+    "team:{{ .team }}",
+    "service:{{ .service }}",
+    "platform-service",
+    "generated:monaco"
+  ]
+}

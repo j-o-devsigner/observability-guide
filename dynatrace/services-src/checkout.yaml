@@ -1,0 +1,11 @@
+# observability.yaml of the checkout service (lives in the service repo; copied here as an example)
+service: checkout
+team: payments
+tier: 1
+archetype: api
+slo:
+  availability: 99.9        # % non-5xx server spans, 28 days
+  latency_ms: 500
+  latency_target: 99        # % of requests under latency_ms
+per_client: true
+runbook: https://wiki.example/runbooks/checkout

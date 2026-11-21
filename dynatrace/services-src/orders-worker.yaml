@@ -1,0 +1,9 @@
+service: orders-worker
+team: payments
+tier: 2
+archetype: queue-consumer
+slo:
+  oldest_message_age_s: 60  # oldest message younger than this, 99% of the time
+dlq_alert: true
+runbook: https://wiki.example/runbooks/orders-worker
+max_consumers: 6                # KEDA maxReplicaCount (≤ partitions)

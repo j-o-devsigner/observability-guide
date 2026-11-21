@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "variables": [
+    {
+      "key": "service",
+      "type": "query",
+      "visible": true,
+      "editable": true,
+      "multiple": false,
+      "input": "fetch spans, from:-24h\n| filter span.kind == \"server\"\n| summarize count(), by:{ service.name }\n| fields service.name"
+    }
+  ],
+  "tiles": {
+    "1": { "type": "markdown", "title": "", "content": "## $service · Service (L1)\nSLO → RED → per client → per version → saturation. Template owned by SRE (Monaco)." },
+    "2": { "type": "data", "title": "Requests", "query": "fetch spans\n| filter service.name == $service and span.kind == \"server\"\n| makeTimeseries requests = count()", "visualization": "lineChart" },
+    "3": { "type": "data", "title": "Error ratio", "query": "fetch spans\n| filter service.name == $service and span.kind == \"server\"\n| makeTimeseries { total = count(), errors = countIf(http.response.status_code >= 500) }\n| fieldsAdd error_ratio = errors[] / total[]\n| fields timeframe, interval, error_ratio", "visualization": "lineChart" },
+    "4": { "type": "data", "title": "Per client", "query": "fetch spans\n| filter service.name == $service and span.kind == \"server\"\n| summarize requests = count(), errors = countIf(http.response.status_code >= 500), by:{ client.id }\n| fieldsAdd error_pct = 100 * errors / requests\n| sort error_pct desc", "visualization": "table" },
+    "5": { "type": "data", "title": "Error ratio by version", "query": "fetch spans\n| filter service.name == $service and span.kind == \"server\"\n| makeTimeseries { total = count(), errors = countIf(http.response.status_code >= 500) }, by:{ service.version }\n| fieldsAdd error_ratio = errors[] / total[]\n| fields timeframe, interval, service.version, error_ratio", "visualization": "lineChart" }
+  },
+  "layouts": {
+    "1": { "x": 0, "y": 0, "w": 24, "h": 2 },
+    "2": { "x": 0, "y": 2, "w": 12, "h": 6 },
+    "3": { "x": 12, "y": 2, "w": 12, "h": 6 },
+    "4": { "x": 0, "y": 8, "w": 12, "h": 7 },
+    "5": { "x": 12, "y": 8, "w": 12, "h": 7 }
+  }
+}

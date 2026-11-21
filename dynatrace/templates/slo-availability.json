@@ -1,0 +1,11 @@
+{
+  "name": "{{ .service }} · availability",
+  "description": "Share of non-5xx server spans. Owner: {{ .team }}. Generated from observability.yaml; do not edit in the UI.",
+  "customSli": {
+    "indicator": "fetch spans\n| filter service.name == \"{{ .service }}\" and span.kind == \"server\"\n| makeTimeseries { total = count(), bad = countIf(http.response.status_code >= 500) }\n| fieldsAdd sli = 100 * (1 - bad[] / total[])"
+  },
+  "criteria": [
+    { "timeframeFrom": "now-28d", "timeframeTo": "now", "target": {{ .target }} }
+  ],
+  "tags": ["team:{{ .team }}", "service:{{ .service }}", "generated:monaco"]
+}

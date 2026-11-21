@@ -1,0 +1,73 @@
+rule_files:
+  - ../checkout-slo.rules.yml
+
+evaluation_interval: 30s
+
+tests:
+  # 100 req/s, 2% errors (above 14.4 x 0.1% = 1.44%) → page fires
+  - name: fast burn pages
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="200"}'
+        values: '0+5880x120'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="500"}'
+        values: '0+120x120'
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate1h
+        eval_time: 90m
+        exp_samples:
+          - labels: 'slo:sli_error:ratio_rate1h{service_name="checkout"}'
+            value: 0.02
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CheckoutErrorBudgetBurnPage
+        exp_alerts:
+          - exp_labels:
+              service_name: checkout
+              severity: page
+              team: checkout
+            exp_annotations:
+              summary: "checkout is burning its error budget fast"
+              description: "1h error ratio 2% (SLO 99.9%)."
+              runbook_url: https://wiki.example/runbooks/checkout-errors
+              dashboard_url: https://grafana.example/d/service-red?var-service=checkout
+
+  # 0.5% errors: above budget (ticket territory) but far from fast burn → no page
+  - name: slow burn does not page
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="200"}'
+        values: '0+5970x120'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="500"}'
+        values: '0+30x120'
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: CheckoutErrorBudgetBurnPage
+        exp_alerts: []
+
+  # Errors stop at minute 80. The 1h/5m pair resolves within ~5 min, but the 6h/30m pair keeps
+  # firing until its 30m short window is clean (~minute 110). Lesson: after a fix, expect up to
+  # 30 min of page before it resolves; the short windows are what make it resolve at all.
+  - name: page resolves once both short windows are clean
+    interval: 1m
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="200"}'
+        values: '0+5880x80 470400+6000x40'
+      - series: 'http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code="500"}'
+        values: '0+120x80 9600+0x40'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CheckoutErrorBudgetBurnPage
+        exp_alerts:
+          - exp_labels:
+              service_name: checkout
+              severity: page
+              team: checkout
+            exp_annotations:
+              summary: "checkout is burning its error budget fast"
+              description: "1h error ratio 2% (SLO 99.9%)."
+              runbook_url: https://wiki.example/runbooks/checkout-errors
+              dashboard_url: https://grafana.example/d/service-red?var-service=checkout
+      - eval_time: 115m
+        alertname: CheckoutErrorBudgetBurnPage
+        exp_alerts: []

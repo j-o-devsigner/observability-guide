@@ -1,0 +1,55 @@
+{
+  "enabled": true,
+  "title": "{{ .service }} · messages in the dead-letter queue",
+  "description": "Count alert: every message in the DLQ is a failed promise. Runbook: {{ .runbook }}",
+  "source": "monaco",
+  "analyzer": {
+    "name": "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer",
+    "input": [
+      {
+        "key": "query",
+        "value": "timeseries dlq = sum(<dlq messages metric>), filter:{ service.name == \"{{ .service }}\" }, interval:5m"
+      },
+      {
+        "key": "threshold",
+        "value": "0"
+      },
+      {
+        "key": "alertCondition",
+        "value": "ABOVE"
+      },
+      {
+        "key": "violatingSamples",
+        "value": "1"
+      },
+      {
+        "key": "slidingWindow",
+        "value": "1"
+      },
+      {
+        "key": "dealertingSamples",
+        "value": "3"
+      }
+    ]
+  },
+  "eventTemplate": {
+    "properties": [
+      {
+        "key": "event.type",
+        "value": "ERROR_EVENT"
+      },
+      {
+        "key": "event.name",
+        "value": "{{ .service }}: messages landed in the DLQ"
+      },
+      {
+        "key": "team",
+        "value": "{{ .team }}"
+      },
+      {
+        "key": "runbook",
+        "value": "{{ .runbook }}"
+      }
+    ]
+  }
+}

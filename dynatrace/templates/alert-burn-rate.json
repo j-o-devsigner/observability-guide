@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "title": "{{ .service }} · SLO fast burn",
+  "description": "Burn rate above {{ .threshold }} over the last hour (SLO {{ .target }}%). Runbook: {{ .runbook }}",
+  "source": "monaco",
+  "analyzer": {
+    "name": "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer",
+    "input": [
+      { "key": "query", "value": "fetch spans, from:-1h\n| filter service.name == \"{{ .service }}\" and span.kind == \"server\"\n| makeTimeseries { total = count(), bad = countIf(http.response.status_code >= 500) }, interval:5m\n| fieldsAdd burn_rate = (bad[] / total[]) / (1 - {{ .target }} / 100)\n| fields timeframe, interval, burn_rate" },
+      { "key": "threshold", "value": "{{ .threshold }}" },
+      { "key": "alertCondition", "value": "ABOVE" },
+      { "key": "violatingSamples", "value": "3" },
+      { "key": "slidingWindow", "value": "5" },
+      { "key": "dealertingSamples", "value": "5" }
+    ]
+  },
+  "eventTemplate": {
+    "properties": [
+      { "key": "event.type", "value": "ERROR_EVENT" },
+      { "key": "event.name", "value": "{{ .service }} is burning its error budget" },
+      { "key": "team", "value": "{{ .team }}" },
+      { "key": "runbook", "value": "{{ .runbook }}" }
+    ]
+  }
+}

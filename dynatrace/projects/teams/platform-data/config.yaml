@@ -1,0 +1,12 @@
+# GENERATED: routing for platform-data (orders-db)
+configs:
+- id: platform-data-workflow-route
+  type:
+    automation:
+      resource: workflow
+  config:
+    name: Route problems · platform-data
+    template: ../../../templates/workflow-route-team.json
+    parameters:
+      team: platform-data
+      channel: '#oncall-platform-data'

@@ -1,0 +1,55 @@
+{
+  "enabled": true,
+  "title": "{{ .service }} · saturation of {{ .resource }}",
+  "description": "{{ .resource }} above {{ .threshold }}% of its limit for 10 min. Owner: {{ .team }}. Runbook: {{ .runbook }}",
+  "source": "monaco",
+  "analyzer": {
+    "name": "dt.statistics.ui.anomaly_detection.StaticThresholdAnomalyDetectionAnalyzer",
+    "input": [
+      {
+        "key": "query",
+        "value": "timeseries used = max(<{{ .resource }} used metric>), limit = max(<{{ .resource }} limit metric>), filter:{ service.name == \"{{ .service }}\" }, interval:1m\n| fieldsAdd pct = 100 * used[] / limit[]\n| fields timeframe, interval, pct"
+      },
+      {
+        "key": "threshold",
+        "value": "{{ .threshold }}"
+      },
+      {
+        "key": "alertCondition",
+        "value": "ABOVE"
+      },
+      {
+        "key": "violatingSamples",
+        "value": "8"
+      },
+      {
+        "key": "slidingWindow",
+        "value": "10"
+      },
+      {
+        "key": "dealertingSamples",
+        "value": "5"
+      }
+    ]
+  },
+  "eventTemplate": {
+    "properties": [
+      {
+        "key": "event.type",
+        "value": "ERROR_EVENT"
+      },
+      {
+        "key": "event.name",
+        "value": "{{ .service }}: {{ .resource }} close to its limit"
+      },
+      {
+        "key": "team",
+        "value": "{{ .team }}"
+      },
+      {
+        "key": "runbook",
+        "value": "{{ .runbook }}"
+      }
+    ]
+  }
+}

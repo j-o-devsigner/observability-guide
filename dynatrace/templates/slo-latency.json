@@ -1,0 +1,11 @@
+{
+  "name": "{{ .service }} · latency < {{ .latency_ms }} ms",
+  "description": "Share of server spans faster than {{ .latency_ms }} ms. Owner: {{ .team }}.",
+  "customSli": {
+    "indicator": "fetch spans\n| filter service.name == \"{{ .service }}\" and span.kind == \"server\"\n| makeTimeseries { total = count(), fast = countIf(duration < {{ .latency_ms }}ms) }\n| fieldsAdd sli = 100 * fast[] / total[]"
+  },
+  "criteria": [
+    { "timeframeFrom": "now-28d", "timeframeTo": "now", "target": {{ .target }} }
+  ],
+  "tags": ["team:{{ .team }}", "service:{{ .service }}", "generated:monaco"]
+}

@@ -1,0 +1,105 @@
+"""Render Monaco configs from each service's observability.yaml (standard/16).
+
+    python3 dynatrace/generate.py            # writes dynatrace/projects/{services,teams}/...
+
+One config per service and per team. Config IDs include the service/team name: Monaco identifies objects by ID, so
+reusing one ID for many services would make every deploy overwrite the previous service. The archetype decides which
+templates a service gets; the service file only supplies values. Never edit the generated files by hand.
+"""
+from pathlib import Path
+import copy
+import shutil
+import yaml
+
+HERE = Path(__file__).resolve().parent
+SRC, OUT = HERE / "services-src", HERE / "projects"
+TPL = "../../../templates"          # from projects/<group>/<name>/config.yaml
+
+ANOMALY = {"settings": {"schema": "builtin:davis.anomaly-detectors", "scope": "environment"}}
+WORKFLOW = {"automation": {"resource": "workflow"}}
+
+# Defaults by tier (standard/16): thresholds are rules of thumb, override them in the service file.
+TIER = {1: {"burn_threshold": 14.4}, 2: {"burn_threshold": 14.4}, 3: {}}
+
+
+def cfg(cid, ctype, name, template, **params):
+    return {"id": cid, "type": copy.deepcopy(ctype), "config": {"name": name, "template": f"{TPL}/{template}", "parameters": params}}
+
+
+def api(s, base):
+    out, slo = [], s["slo"]
+    out.append(cfg(f"{s['service']}-slo-availability", "slo-v2", f"{s['service']} · availability",
+                   "slo-availability.json", **base, target=slo["availability"]))
+    if "latency_ms" in slo:
+        out.append(cfg(f"{s['service']}-slo-latency", "slo-v2", f"{s['service']} · latency",
+                       "slo-latency.json", **base, latency_ms=slo["latency_ms"], target=slo.get("latency_target", 99)))
+    out.append(cfg(f"{s['service']}-alert-burn-rate", ANOMALY, f"{s['service']} · SLO fast burn", "alert-burn-rate.json",
+                   **base, target=slo["availability"], threshold=s.get("burn_threshold", TIER[s["tier"]].get("burn_threshold", 14.4))))
+    if s.get("per_client"):
+        out.append(cfg(f"{s['service']}-alert-client-ratio", ANOMALY, f"{s['service']} · error ratio per client",
+                       "alert-client-ratio.json", **base, ratio_pct=s.get("client_ratio_pct", 5), min_errors=s.get("client_min_errors", 20)))
+    return out
+
+
+def queue_consumer(s, base):
+    out = [cfg(f"{s['service']}-slo-queue-age", "slo-v2", f"{s['service']} · oldest message age", "slo-queue-age.json",
+               **base, max_age_s=s["slo"]["oldest_message_age_s"])]
+    if s.get("dlq_alert", True):
+        out.append(cfg(f"{s['service']}-alert-dlq", ANOMALY, f"{s['service']} · DLQ", "alert-dlq.json", **base))
+    if "max_consumers" in s:                  # autoscaled: at max AND backlog growing = capacity problem (standard/13)
+        out.append(cfg(f"{s['service']}-alert-backlog-at-max", ANOMALY, f"{s['service']} · backlog at max consumers",
+                       "alert-backlog-at-max.json", **base, max_consumers=s["max_consumers"]))
+    return out
+
+
+def batch(s, base):
+    return [cfg(f"{s['service']}-alert-batch-overdue", ANOMALY, f"{s['service']} · batch overdue", "alert-batch-overdue.json",
+                **base, max_gap_h=2 * s["schedule_hours"])]
+
+
+def platform_service(s, base):
+    """Shared platform service (DB, cache, broker): internal SLO from callers' client spans + saturation (standard/09)."""
+    out = [cfg(f"{s['service']}-slo-callers", "slo-v2", f"{s['service']} · availability seen by callers",
+               "slo-internal-client.json", **base, address=s["address"], target=s["slo"]["availability"],
+               consumers=", ".join(s.get("consumers", [])))]
+    for sat in s.get("saturation", []):
+        out.append(cfg(f"{s['service']}-alert-saturation-{sat['resource']}", ANOMALY, f"{s['service']} · {sat['resource']} saturation",
+                       "alert-saturation.json", **base, resource=sat["resource"], threshold=sat["threshold"]))
+    return out
+
+
+ARCHETYPES = {"api": api, "queue-consumer": queue_consumer, "batch": batch, "platform-service": platform_service}
+REQUIRED = ["service", "team", "tier", "archetype", "runbook"]
+
+
+def main():
+    if OUT.exists():
+        shutil.rmtree(OUT)                    # generated output only; services-src and templates are untouched
+    teams = {}
+    for f in sorted(SRC.glob("*.yaml")):
+        s = yaml.safe_load(f.read_text())
+        missing = [k for k in REQUIRED if k not in s]
+        if missing:                           # the definition of done, enforced in CI
+            raise SystemExit(f"{f.name}: missing {missing}")
+        if s["archetype"] not in ARCHETYPES:
+            raise SystemExit(f"{f.name}: unknown archetype {s['archetype']!r} (use {sorted(ARCHETYPES)})")
+        base = {"service": s["service"], "team": s["team"], "runbook": s["runbook"]}
+        configs = ARCHETYPES[s["archetype"]](s, base)
+        d = OUT / "services" / s["service"]
+        d.mkdir(parents=True)
+        (d / "config.yaml").write_text("# GENERATED by dynatrace/generate.py from services-src/" + f.name + "\n" +
+                                       yaml.safe_dump({"configs": configs}, sort_keys=False, allow_unicode=True))
+        teams.setdefault(s["team"], []).append(s["service"])
+        print(f"{s['service']:<16} {s['archetype']:<15} {len(configs)} configs")
+    for team, services in teams.items():
+        d = OUT / "teams" / team
+        d.mkdir(parents=True)
+        wf = cfg(f"{team}-workflow-route", WORKFLOW, f"Route problems · {team}", "workflow-route-team.json",
+                 team=team, channel=f"#oncall-{team}")
+        (d / "config.yaml").write_text(f"# GENERATED: routing for {team} ({', '.join(services)})\n" +
+                                       yaml.safe_dump({"configs": [wf]}, sort_keys=False, allow_unicode=True))
+        print(f"team {team:<11} workflow ({len(services)} services)")
+
+
+if __name__ == "__main__":
+    main()

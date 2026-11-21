@@ -1,0 +1,12 @@
+# GENERATED: routing for payments (checkout, orders-worker)
+configs:
+- id: payments-workflow-route
+  type:
+    automation:
+      resource: workflow
+  config:
+    name: Route problems · payments
+    template: ../../../templates/workflow-route-team.json
+    parameters:
+      team: payments
+      channel: '#oncall-payments'

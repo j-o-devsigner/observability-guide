@@ -1,0 +1,67 @@
+# SLO recording rules + multi-window, multi-burn-rate alerts for one service (checkout).
+# SLO: 99.9% availability (non-5xx) → error budget 0.001.
+# Burn rates and windows: Google SRE Workbook, "Alerting on SLOs" (14.4x 1h/5m, 6x 6h/30m page; 1x 3d/6h ticket).
+# Tested: rules/tests/checkout-slo.test.yml (promtool test rules)
+groups:
+  - name: checkout-sli
+    interval: 30s
+    rules:
+      - record: slo:sli_error:ratio_rate5m
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code=~"5.."}[5m]))
+          /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[5m]))
+      - record: slo:sli_error:ratio_rate30m
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code=~"5.."}[30m]))
+          /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[30m]))
+      - record: slo:sli_error:ratio_rate1h
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code=~"5.."}[1h]))
+          /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[1h]))
+      - record: slo:sli_error:ratio_rate6h
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code=~"5.."}[6h]))
+          /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[6h]))
+      - record: slo:sli_error:ratio_rate3d
+        expr: |
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout", http_response_status_code=~"5.."}[3d]))
+          /
+          sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[3d]))
+      - record: slo:requests:rate1h
+        expr: sum by (service_name) (rate(http_server_request_duration_seconds_count{service_name="checkout"}[1h]))
+
+  - name: checkout-slo-alerts
+    rules:
+      - alert: CheckoutErrorBudgetBurnPage
+        expr: |
+          (
+            (slo:sli_error:ratio_rate1h > (14.4 * 0.001) and slo:sli_error:ratio_rate5m > (14.4 * 0.001))
+            or
+            (slo:sli_error:ratio_rate6h > (6 * 0.001) and slo:sli_error:ratio_rate30m > (6 * 0.001))
+          )
+          and on (service_name) slo:requests:rate1h > 0.1
+        for: 2m
+        labels:
+          severity: page
+          team: checkout
+        annotations:
+          summary: "checkout is burning its error budget fast"
+          description: "1h error ratio {{ $value | humanizePercentage }} (SLO 99.9%)."
+          runbook_url: https://wiki.example/runbooks/checkout-errors
+          dashboard_url: https://grafana.example/d/service-red?var-service=checkout
+
+      - alert: CheckoutErrorBudgetBurnTicket
+        expr: |
+          slo:sli_error:ratio_rate3d > (1 * 0.001)
+          and slo:sli_error:ratio_rate6h > (1 * 0.001)
+        for: 1h
+        labels:
+          severity: ticket
+          team: checkout
+        annotations:
+          summary: "checkout is slowly burning its error budget"
+          runbook_url: https://wiki.example/runbooks/checkout-errors

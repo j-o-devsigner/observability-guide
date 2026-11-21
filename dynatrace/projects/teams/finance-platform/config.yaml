@@ -1,0 +1,12 @@
+# GENERATED: routing for finance-platform (nightly-billing)
+configs:
+- id: finance-platform-workflow-route
+  type:
+    automation:
+      resource: workflow
+  config:
+    name: Route problems · finance-platform
+    template: ../../../templates/workflow-route-team.json
+    parameters:
+      team: finance-platform
+      channel: '#oncall-finance-platform'

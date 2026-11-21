@@ -1,0 +1,11 @@
+{
+  "name": "{{ .service }} · oldest message < {{ .max_age_s }} s",
+  "description": "Share of time the oldest waiting message is younger than {{ .max_age_s }} s. Owner: {{ .team }}.",
+  "customSli": {
+    "indicator": "timeseries age = max(<oldest-message-age metric>), filter:{ service.name == \"{{ .service }}\" }\n| fieldsAdd sli = 100 * iCollectArray(if(age[] < {{ .max_age_s }}, 1, else: 0))"
+  },
+  "criteria": [
+    { "timeframeFrom": "now-28d", "timeframeTo": "now", "target": 99 }
+  ],
+  "tags": ["team:{{ .team }}", "service:{{ .service }}", "generated:monaco"]
+}
